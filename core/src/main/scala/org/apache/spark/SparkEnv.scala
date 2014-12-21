@@ -156,7 +156,15 @@ object SparkEnv extends Logging {
     assert(conf.contains("spark.driver.port"), "spark.driver.port is not set on the driver!")
     val hostname = conf.get("spark.driver.host")
     val port = conf.get("spark.driver.port").toInt
-    create(conf, SparkContext.DRIVER_IDENTIFIER, hostname, port, true, isLocal, listenerBus)
+    create(
+      conf,
+      SparkContext.DRIVER_IDENTIFIER,
+      hostname,
+      port,
+      isDriver = true,
+      isLocal = isLocal,
+      listenerBus = listenerBus
+    )
   }
 
   /**
@@ -168,9 +176,19 @@ object SparkEnv extends Logging {
       executorId: String,
       hostname: String,
       port: Int,
-      isLocal: Boolean,
-      actorSystem: ActorSystem = null): SparkEnv = {
-    create(conf, executorId, hostname, port, false, isLocal, defaultActorSystem = actorSystem)
+      numCores: Int,
+      isLocal: Boolean): SparkEnv = {
+    val env = create(
+      conf,
+      executorId,
+      hostname,
+      port,
+      isDriver = false,
+      isLocal = isLocal,
+      numUsableCores = numCores
+    )
+    SparkEnv.set(env)
+    env
   }
 
   /**
@@ -184,7 +202,7 @@ object SparkEnv extends Logging {
       isDriver: Boolean,
       isLocal: Boolean,
       listenerBus: LiveListenerBus = null,
-      defaultActorSystem: ActorSystem = null): SparkEnv = {
+      numUsableCores: Int = 0): SparkEnv = {
 
     // Listener bus is only used on the driver
     if (isDriver) {
@@ -193,20 +211,17 @@ object SparkEnv extends Logging {
 
     val securityManager = new SecurityManager(conf)
 
-    // If an existing actor system is already provided, use it.
-    // This is the case when an executor is launched in coarse-grained mode.
-    val (actorSystem, boundPort) =
-      Option(defaultActorSystem) match {
-        case Some(as) => (as, port)
-        case None =>
-          val actorSystemName = if (isDriver) driverActorSystemName else executorActorSystemName
-          AkkaUtils.createActorSystem(actorSystemName, hostname, port, conf, securityManager)
-      }
+    // Create the ActorSystem for Akka and get the port it binds to.
+    val (actorSystem, boundPort) = {
+      val actorSystemName = if (isDriver) driverActorSystemName else executorActorSystemName
+      AkkaUtils.createActorSystem(actorSystemName, hostname, port, conf, securityManager)
+    }
 
     // Figure out which port Akka actually bound to in case the original port is 0 or occupied.
-    // This is so that we tell the executors the correct port to connect to.
     if (isDriver) {
       conf.set("spark.driver.port", boundPort.toString)
+    } else {
+      conf.set("spark.executor.port", boundPort.toString)
     }
 
     // Create an instance of the class with the given name, possibly initializing it with our conf
@@ -276,7 +291,7 @@ object SparkEnv extends Logging {
     val blockTransferService =
       conf.get("spark.shuffle.blockTransferService", "netty").toLowerCase match {
         case "netty" =>
-          new NettyBlockTransferService(conf)
+          new NettyBlockTransferService(conf, securityManager, numUsableCores)
         case "nio" =>
           new NioBlockTransferService(conf, securityManager)
       }
@@ -285,8 +300,10 @@ object SparkEnv extends Logging {
       "BlockManagerMaster",
       new BlockManagerMasterActor(isLocal, conf, listenerBus)), conf, isDriver)
 
+    // NB: blockManager is not valid until initialize() is called later.
     val blockManager = new BlockManager(executorId, actorSystem, blockManagerMaster,
-      serializer, conf, mapOutputTracker, shuffleManager, blockTransferService)
+      serializer, conf, mapOutputTracker, shuffleManager, blockTransferService, securityManager,
+      numUsableCores)
 
     val broadcastManager = new BroadcastManager(isDriver, conf, securityManager)
 

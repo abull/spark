@@ -56,7 +56,7 @@ class SQLQuerySuite extends QueryTest {
     sql(
       """CREATE TABLE IF NOT EXISTS ctas4 AS
         | SELECT 1 AS key, value FROM src LIMIT 1""".stripMargin).collect
-    // expect the string => integer for field key cause the table ctas4 already existed.
+    // do nothing cause the table ctas4 already existed.
     sql(
       """CREATE TABLE IF NOT EXISTS ctas4 AS
         | SELECT key, value FROM src ORDER BY key, value""".stripMargin).collect
@@ -78,9 +78,14 @@ class SQLQuerySuite extends QueryTest {
           SELECT key, value
           FROM src
           ORDER BY key, value""").collect().toSeq)
+    intercept[org.apache.hadoop.hive.metastore.api.AlreadyExistsException] {
+      sql(
+        """CREATE TABLE ctas4 AS
+          | SELECT key, value FROM src ORDER BY key, value""".stripMargin).collect
+    }
     checkAnswer(
       sql("SELECT key, value FROM ctas4 ORDER BY key, value"),
-      sql("SELECT CAST(key AS int) k, value FROM src ORDER BY k, value").collect().toSeq)
+      sql("SELECT key, value FROM ctas4 LIMIT 1").collect().toSeq)
 
     checkExistence(sql("DESC EXTENDED ctas2"), true,
       "name:key", "type:string", "name:value", "ctas2",
@@ -114,6 +119,15 @@ class SQLQuerySuite extends QueryTest {
     checkAnswer(
       sql("SELECT f1.f2.f3 FROM nested"),
       1)
+    checkAnswer(sql("CREATE TABLE test_ctas_1234 AS SELECT * from nested"),
+      Seq.empty[Row])
+    checkAnswer(
+      sql("SELECT * FROM test_ctas_1234"),
+      sql("SELECT * FROM nested").collect().toSeq)
+
+    intercept[org.apache.hadoop.hive.ql.metadata.InvalidTableException] {
+      sql("CREATE TABLE test_ctas_12345 AS SELECT * from notexists").collect()
+    }
   }
 
   test("test CTAS") {
@@ -121,6 +135,19 @@ class SQLQuerySuite extends QueryTest {
     checkAnswer(
       sql("SELECT key, value FROM test_ctas_123 ORDER BY key"), 
       sql("SELECT key, value FROM src ORDER BY key").collect().toSeq)
+  }
+
+  test("SPARK-4825 save join to table") {
+    val testData = sparkContext.parallelize(1 to 10).map(i => TestData(i, i.toString))
+    sql("CREATE TABLE test1 (key INT, value STRING)")
+    testData.insertInto("test1")
+    sql("CREATE TABLE test2 (key INT, value STRING)")
+    testData.insertInto("test2")
+    testData.insertInto("test2")
+    sql("SELECT COUNT(a.value) FROM test1 a JOIN test2 b ON a.key = b.key").saveAsTable("test")
+    checkAnswer(
+      table("test"),
+      sql("SELECT COUNT(a.value) FROM test1 a JOIN test2 b ON a.key = b.key").collect().toSeq)
   }
 
   test("SPARK-3708 Backticks aren't handled correctly is aliases") {
@@ -158,9 +185,14 @@ class SQLQuerySuite extends QueryTest {
       sql("SELECT case when ~1=-2 then 1 else 0 end FROM src"),
       sql("SELECT 1 FROM src").collect().toSeq)
   }
-  
- test("SPARK-4154 Query does not work if it has 'not between' in Spark SQL and HQL") {
-    checkAnswer(sql("SELECT key FROM src WHERE key not between 0 and 10 order by key"), 
-        sql("SELECT key FROM src WHERE key between 11 and 500 order by key").collect().toSeq)
+
+  test("SPARK-4154 Query does not work if it has 'not between' in Spark SQL and HQL") {
+    checkAnswer(sql("SELECT key FROM src WHERE key not between 0 and 10 order by key"),
+      sql("SELECT key FROM src WHERE key between 11 and 500 order by key").collect().toSeq)
+  }
+
+  test("SPARK-2554 SumDistinct partial aggregation") {
+    checkAnswer(sql("SELECT sum( distinct key) FROM src group by key order by key"),
+      sql("SELECT distinct key FROM src order by key").collect().toSeq)
   }
 }

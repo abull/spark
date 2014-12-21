@@ -110,7 +110,8 @@ package object dsl {
     def asc = SortOrder(expr, Ascending)
     def desc = SortOrder(expr, Descending)
 
-    def as(s: Symbol) = Alias(expr, s.name)()
+    def as(alias: String) = Alias(expr, alias)()
+    def as(alias: Symbol) = Alias(expr, alias.name)()
   }
 
   trait ExpressionConversions {
@@ -146,6 +147,8 @@ package object dsl {
     def max(e: Expression) = Max(e)
     def upper(e: Expression) = Upper(e)
     def lower(e: Expression) = Lower(e)
+    def sqrt(e: Expression) = Sqrt(e)
+    def abs(e: Expression) = Abs(e)
 
     implicit class DslSymbol(sym: Symbol) extends ImplicitAttribute { def s = sym.name }
     // TODO more implicit class for literal?
@@ -242,6 +245,8 @@ package object dsl {
       Join(logicalPlan, otherPlan, joinType, condition)
 
     def orderBy(sortExprs: SortOrder*) = Sort(sortExprs, logicalPlan)
+
+    def sortBy(sortExprs: SortOrder*) = SortPartitions(sortExprs, logicalPlan)
 
     def groupBy(groupingExprs: Expression*)(aggregateExprs: Expression*) = {
       val aliasedExprs = aggregateExprs.map {

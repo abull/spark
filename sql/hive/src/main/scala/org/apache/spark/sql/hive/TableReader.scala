@@ -57,10 +57,15 @@ class HadoopTableReader(
     @transient hiveExtraConf: HiveConf)
   extends TableReader {
 
-  // Choose the minimum number of splits. If mapred.map.tasks is set, then use that unless
-  // it is smaller than what Spark suggests.
-  private val _minSplitsPerRDD = math.max(
-    sc.hiveconf.getInt("mapred.map.tasks", 1), sc.sparkContext.defaultMinPartitions)
+  // Hadoop honors "mapred.map.tasks" as hint, but will ignore when mapred.job.tracker is "local".
+  // https://hadoop.apache.org/docs/r1.0.4/mapred-default.html
+  //
+  // In order keep consistency with Hive, we will let it be 0 in local mode also.
+  private val _minSplitsPerRDD = if (sc.sparkContext.isLocal) {
+    0 // will splitted based on block by default.
+  } else {
+    math.max(sc.hiveconf.getInt("mapred.map.tasks", 1), sc.sparkContext.defaultMinPartitions)
+  }
 
   // TODO: set aws s3 credentials.
 
@@ -290,6 +295,21 @@ private[hive] object HadoopTableReader extends HiveInspectors {
           (value: Any, row: MutableRow, ordinal: Int) => row.setFloat(ordinal, oi.get(value))
         case oi: DoubleObjectInspector =>
           (value: Any, row: MutableRow, ordinal: Int) => row.setDouble(ordinal, oi.get(value))
+        case oi: HiveVarcharObjectInspector =>
+          (value: Any, row: MutableRow, ordinal: Int) =>
+            row.setString(ordinal, oi.getPrimitiveJavaObject(value).getValue)
+        case oi: HiveDecimalObjectInspector =>
+          (value: Any, row: MutableRow, ordinal: Int) =>
+            row.update(ordinal, HiveShim.toCatalystDecimal(oi, value))
+        case oi: TimestampObjectInspector =>
+          (value: Any, row: MutableRow, ordinal: Int) =>
+            row.update(ordinal, oi.getPrimitiveJavaObject(value).clone())
+        case oi: DateObjectInspector =>
+          (value: Any, row: MutableRow, ordinal: Int) =>
+            row.update(ordinal, oi.getPrimitiveJavaObject(value))
+        case oi: BinaryObjectInspector =>
+          (value: Any, row: MutableRow, ordinal: Int) =>
+            row.update(ordinal, oi.getPrimitiveJavaObject(value))
         case oi =>
           (value: Any, row: MutableRow, ordinal: Int) => row(ordinal) = unwrap(value, oi)
       }
